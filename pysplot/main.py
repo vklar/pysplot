@@ -13,6 +13,8 @@ def main():
     BUFF_SIZE = 1000
     UPDATE_INTERVAL = 1  # ms
     SERIAL_TIMEOUT = 0.1
+    AUTOSCALE_SAMPLES = 10  # Use samples 6-15
+    SKIP_INITIAL_SAMPLES = 5  # Skip first 5 samples
 
     pg.setConfigOption("background", DARK_BG)
     pg.setConfigOption("foreground", DARK_TEXT)
@@ -157,6 +159,12 @@ def main():
             self.resize(1000, 100 + 150 * num_signals)
             self.frozen = False
 
+            # Autoscale tracking
+            self.sample_count = 0
+            self.autoscale_applied = False
+            self.autoscale_samples = []
+            self.autoscale_enabled = True
+
             # Create central widget with main layout
             central = QtWidgets.QWidget()
             self.setCentralWidget(central)
@@ -167,7 +175,7 @@ def main():
             btn_widget = QtWidgets.QWidget()
             btn_layout = QtWidgets.QHBoxLayout(btn_widget)
             btn_layout.setContentsMargins(10, 5, 10, 5)
-            
+
             # Create freeze button
             self.freeze_btn = QtWidgets.QPushButton("Freeze")
             self.freeze_btn.setCheckable(True)
@@ -187,7 +195,7 @@ def main():
             """)
             self.freeze_btn.toggled.connect(self.on_freeze_toggled)
             btn_layout.addWidget(self.freeze_btn)
-            
+
             # Create export button (hidden by default)
             self.export_btn = QtWidgets.QPushButton("Export CSV")
             self.export_btn.setMaximumWidth(120)
@@ -206,7 +214,7 @@ def main():
             self.export_btn.clicked.connect(self.on_export_csv)
             self.export_btn.setVisible(False)
             btn_layout.addWidget(self.export_btn)
-            
+
             btn_layout.addStretch()
             btn_widget.setStyleSheet(f"QWidget {{ background-color: {DARK_BG}; }}")
             main_layout.addWidget(btn_widget)
@@ -218,7 +226,7 @@ def main():
             # Create data buffers
             self.x = np.arange(buff_size)
             self.sample_buffers = np.zeros((num_signals, buff_size))
-            
+
             # Store plots and curves
             self.plots = []
             self.curves = []
@@ -226,10 +234,7 @@ def main():
             # Create stacked plots
             self.bottom_plot = None
             for i in range(num_signals):
-                plot = layout_widget.addPlot(
-                    row=i, col=0,
-                    title=f"Signal {i + 1}"
-                )
+                plot = layout_widget.addPlot(row=i, col=0, title=f"Signal {i + 1}")
                 plot.getViewBox().setBackgroundColor(DARK_BG)
                 plot.showGrid(x=True, y=True, alpha=0.2)
 
@@ -251,7 +256,7 @@ def main():
                 # Create curve
                 color = pg.intColor(i, hues=num_signals)
                 curve = plot.plot(pen=color)
-                
+
                 self.plots.append(plot)
                 self.curves.append(curve)
 
@@ -261,7 +266,9 @@ def main():
 
             # Apply dark theme to window
             central.setStyleSheet(f"QWidget {{ background-color: {DARK_BG}; color: {DARK_TEXT}; }}")
-            self.setStyleSheet(f"QMainWindow {{ background-color: {DARK_BG}; color: {DARK_TEXT}; }}")
+            self.setStyleSheet(
+                f"QMainWindow {{ background-color: {DARK_BG}; color: {DARK_TEXT}; }}"
+            )
 
         def on_freeze_toggled(self, checked):
             """Handle freeze button toggle."""
@@ -272,15 +279,52 @@ def main():
             else:
                 self.freeze_btn.setText("Freeze")
 
+        def apply_autoscale(self):
+            """Apply autoscaling based on current buffer data."""
+            if not self.autoscale_enabled:
+                return
+
+            for i, plot in enumerate(self.plots):
+                y_data = self.sample_buffers[i]
+                # Only consider non-zero values
+                valid_data = y_data[y_data != 0] if np.any(y_data != 0) else y_data
+
+                if len(valid_data) > 0:
+                    y_min, y_max = np.min(valid_data), np.max(valid_data)
+                    y_range = y_max - y_min
+
+                    # Add 10% padding
+                    padding = y_range * 0.1 if y_range > 0 else 0.5
+                    plot.setYRange(y_min - padding, y_max + padding, padding=0)
+
         def update_data(self, values):
             """Update all plots with new data."""
             if not self.frozen and len(values) == self.num_signals:
+                # Track samples for initial autoscaling trigger
+                if not self.autoscale_applied:
+                    self.sample_count += 1
+
+                    # Skip first SKIP_INITIAL_SAMPLES, collect next AUTOSCALE_SAMPLES
+                    if self.sample_count > SKIP_INITIAL_SAMPLES:
+                        self.autoscale_samples.append(values.copy())
+
+                    # Enable continuous autoscaling once we have enough samples
+                    if len(self.autoscale_samples) == AUTOSCALE_SAMPLES:
+                        print(
+                            f"Autoscale enabled based on samples {SKIP_INITIAL_SAMPLES + 1}-{SKIP_INITIAL_SAMPLES + AUTOSCALE_SAMPLES}"
+                        )
+                        self.autoscale_applied = True
+
                 # Update buffers
                 self.sample_buffers = np.column_stack([values, self.sample_buffers[:, :-1]])
-                
+
                 # Update curves
                 for i, curve in enumerate(self.curves):
                     curve.setData(self.x, self.sample_buffers[i])
+
+                # Apply continuous autoscaling
+                if self.autoscale_enabled and self.autoscale_applied:
+                    self.apply_autoscale()
 
         def on_export_csv(self):
             """Export current frozen data to CSV."""
@@ -288,7 +332,7 @@ def main():
                 self,
                 "Export Frozen Data",
                 f"splotdata_frozen_{datetime.datetime.now().strftime('%Y%m%dT%H%M%S')}.csv",
-                "CSV Files (*.csv)"
+                "CSV Files (*.csv)",
             )
             if ok and filename:
                 try:
@@ -302,7 +346,9 @@ def main():
                     print(f"Data exported: {filename}")
                 except Exception as e:
                     print(f"Error exporting data: {e}")
-                    QtWidgets.QMessageBox.critical(self, "Export Error", f"Failed to export data: {e}")
+                    QtWidgets.QMessageBox.critical(
+                        self, "Export Error", f"Failed to export data: {e}"
+                    )
 
     # ===== INITIALIZE WORKER THREAD =====
     try:
