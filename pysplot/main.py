@@ -305,6 +305,10 @@ def main():
             self.autoscale_samples = []
             self.autoscale_enabled = True
 
+            # Plot visibility tracking
+            self.plot_visible = [True] * num_signals
+            self.plot_containers = []  # Store plot containers for show/hide
+
             # Create central widget with main layout
             central = QtWidgets.QWidget()
             self.setCentralWidget(central)
@@ -377,9 +381,13 @@ def main():
             btn_widget.setStyleSheet(f"QWidget {{ background-color: {DARK_BG}; }}")
             main_layout.addWidget(btn_widget)
 
-            # Create graphics layout widget for plots
-            layout_widget = pg.GraphicsLayoutWidget()
-            main_layout.addWidget(layout_widget)
+            # Create scroll area for plots
+            scroll_area = QtWidgets.QScrollArea()
+            scroll_area.setWidgetResizable(True)
+            scroll_widget = QtWidgets.QWidget()
+            scroll_layout = QtWidgets.QVBoxLayout(scroll_widget)
+            scroll_layout.setContentsMargins(0, 0, 0, 0)
+            scroll_layout.setSpacing(0)
 
             # Create data buffers
             self.x = np.arange(buff_size)
@@ -389,44 +397,169 @@ def main():
             self.plots = []
             self.curves = []
 
-            # Create stacked plots
-            self.bottom_plot = None
+            # Create stacked plots with minimize buttons
             for i in range(num_signals):
-                plot = layout_widget.addPlot(row=i, col=0, title=f"Signal {i + 1}")
-                plot.getViewBox().setBackgroundColor(DARK_BG)
-                plot.showGrid(x=True, y=True, alpha=0.2)
+                # Container for each plot with header
+                plot_container = QtWidgets.QWidget()
+                plot_layout = QtWidgets.QVBoxLayout(plot_container)
+                plot_layout.setContentsMargins(0, 0, 0, 0)
+                plot_layout.setSpacing(0)
+
+                # Header with minimize button
+                header = QtWidgets.QWidget()
+                header_layout = QtWidgets.QHBoxLayout(header)
+                header_layout.setContentsMargins(10, 5, 10, 5)
+
+                min_btn = QtWidgets.QPushButton("−")
+                min_btn.setMaximumWidth(30)
+                min_btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background-color: #404040;
+                        color: {DARK_TEXT};
+                        border: 1px solid #606060;
+                        padding: 2px;
+                        border-radius: 2px;
+                        font-weight: bold;
+                    }}
+                    QPushButton:hover {{
+                        background-color: #505050;
+                    }}
+                """)
+
+                title_label = QtWidgets.QLabel(f"Signal {i + 1}")
+                title_label.setStyleSheet(f"color: {DARK_TEXT}; font-weight: bold;")
+
+                header_layout.addWidget(min_btn)
+                header_layout.addWidget(title_label)
+                header_layout.addStretch()
+
+                header.setStyleSheet(f"QWidget {{ background-color: #2a2a2a; }}")
+
+                plot_layout.addWidget(header)
+
+                # Plot widget
+                plot_widget = pg.PlotWidget()
+                plot_widget.getViewBox().setBackgroundColor(DARK_BG)
+                plot_widget.showGrid(x=True, y=True, alpha=0.2)
 
                 # Style axes
-                plot.getAxis("left").setPen(pg.mkPen(color=DARK_TEXT, width=1))
-                plot.getAxis("left").setTextPen(pg.mkPen(color=DARK_TEXT))
-                plot.getAxis("bottom").setPen(pg.mkPen(color=DARK_TEXT, width=1))
-                plot.getAxis("bottom").setTextPen(pg.mkPen(color=DARK_TEXT))
+                plot_widget.getAxis("left").setPen(pg.mkPen(color=DARK_TEXT, width=1))
+                plot_widget.getAxis("left").setTextPen(pg.mkPen(color=DARK_TEXT))
+                plot_widget.getAxis("bottom").setPen(pg.mkPen(color=DARK_TEXT, width=1))
+                plot_widget.getAxis("bottom").setTextPen(pg.mkPen(color=DARK_TEXT))
 
                 # Only show x-axis label on bottom plot
                 if i == num_signals - 1:
-                    plot.setLabel("bottom", "Sample", color=DARK_TEXT)
-                    self.bottom_plot = plot
+                    plot_widget.setLabel("bottom", "Sample", color=DARK_TEXT)
                 else:
-                    plot.getAxis("bottom").hide()
+                    plot_widget.getAxis("bottom").hide()
 
-                plot.setLabel("left", f"Signal {i + 1}", color=DARK_TEXT)
+                plot_widget.setLabel("left", f"Signal {i + 1}", color=DARK_TEXT)
+                plot_widget.setMaximumHeight(500)
+                plot_widget.setMinimumHeight(80)
 
                 # Create curve
                 color = pg.intColor(i, hues=num_signals)
-                curve = plot.plot(pen=color)
+                curve = plot_widget.plot(pen=color)
 
-                self.plots.append(plot)
+                plot_layout.addWidget(plot_widget, 1)
+
+                # Resize handle at bottom
+                resize_handle = QtWidgets.QWidget()
+                resize_handle.setCursor(QtCore.Qt.CursorShape.SizeVerCursor)
+                resize_handle.setFixedHeight(8)
+                resize_handle.setStyleSheet(f"QWidget {{ background-color: #3a3a3a; }}")
+                plot_layout.addWidget(resize_handle)
+
+                # Connect minimize button
+                plot_index = i
+                min_btn.clicked.connect(lambda checked, idx=plot_index: self.toggle_plot_visibility(idx))
+
+                # Store references
+                self.plots.append(plot_widget)
                 self.curves.append(curve)
+                self.plot_containers.append((plot_container, plot_widget, min_btn, resize_handle))
+
+                scroll_layout.addWidget(plot_container)
+
+                # Enable drag-to-resize
+                self.setup_resize_handler(plot_container, plot_widget, resize_handle, plot_index)
 
             # Link x-axes together
             for i in range(1, num_signals):
                 self.plots[i].setXLink(self.plots[0])
 
+            scroll_layout.addStretch()
+            scroll_area.setWidget(scroll_widget)
+            main_layout.addWidget(scroll_area)
+
             # Apply dark theme to window
+            scroll_area.setStyleSheet(f"QWidget {{ background-color: {DARK_BG}; color: {DARK_TEXT}; }}")
+            scroll_widget.setStyleSheet(f"QWidget {{ background-color: {DARK_BG}; }}")
             central.setStyleSheet(f"QWidget {{ background-color: {DARK_BG}; color: {DARK_TEXT}; }}")
             self.setStyleSheet(
                 f"QMainWindow {{ background-color: {DARK_BG}; color: {DARK_TEXT}; }}"
             )
+
+        def setup_resize_handler(self, container, plot_widget, handle, index):
+            """Setup drag-to-resize functionality for a plot."""
+            if not hasattr(self, 'resize_data'):
+                self.resize_data = {}
+
+            class ResizeHandle(QtWidgets.QWidget):
+                def __init__(self, parent_window, pw, idx):
+                    super().__init__()
+                    self.parent_window = parent_window
+                    self.plot_widget = pw
+                    self.index = idx
+                    self.dragging = False
+
+                def mousePressEvent(self, event):
+                    self.dragging = True
+                    self.parent_window.resize_data[self.index] = {
+                        "start_y": event.globalPosition().y(),
+                        "start_height": self.plot_widget.height()
+                    }
+
+                def mouseMoveEvent(self, event):
+                    if self.dragging and self.index in self.parent_window.resize_data:
+                        delta = event.globalPosition().y() - self.parent_window.resize_data[self.index]["start_y"]
+                        new_height = max(80, self.parent_window.resize_data[self.index]["start_height"] + delta)
+                        self.plot_widget.setFixedHeight(int(new_height))
+
+                def mouseReleaseEvent(self, event):
+                    self.dragging = False
+                    if self.index in self.parent_window.resize_data:
+                        del self.parent_window.resize_data[self.index]
+
+            # Replace the handle with a ResizeHandle instance
+            parent_layout = handle.parent().layout()
+            idx = parent_layout.indexOf(handle)
+            handle.deleteLater()
+
+            new_handle = ResizeHandle(self, plot_widget, index)
+            new_handle.setCursor(QtCore.Qt.CursorShape.SizeVerCursor)
+            new_handle.setFixedHeight(8)
+            new_handle.setStyleSheet(f"QWidget {{ background-color: #3a3a3a; }}")
+            parent_layout.insertWidget(idx, new_handle)
+
+            # Update the stored reference
+            container_ref = self.plot_containers[index]
+            self.plot_containers[index] = (container_ref[0], container_ref[1], container_ref[2], new_handle)
+
+        def toggle_plot_visibility(self, index):
+            """Toggle visibility of a plot."""
+            self.plot_visible[index] = not self.plot_visible[index]
+            container, plot_widget, min_btn, resize_handle = self.plot_containers[index]
+
+            if self.plot_visible[index]:
+                plot_widget.show()
+                resize_handle.show()
+                min_btn.setText("−")
+            else:
+                plot_widget.hide()
+                resize_handle.hide()
+                min_btn.setText("+")
 
         def on_freeze_toggled(self, checked):
             """Handle freeze button toggle."""
@@ -443,6 +576,9 @@ def main():
                 return
 
             for i, plot in enumerate(self.plots):
+                if not self.plot_visible[i]:
+                    continue
+
                 y_data = self.sample_buffers[i]
                 # Only consider non-zero values
                 valid_data = y_data[y_data != 0] if np.any(y_data != 0) else y_data
@@ -460,6 +596,9 @@ def main():
             num_samples_to_use = max(1, self.buff_size // 10)
 
             for i, plot in enumerate(self.plots):
+                if not self.plot_visible[i]:
+                    continue
+
                 # Get first 10% of buffer (most recent data in circular buffer)
                 y_data = self.sample_buffers[i, :num_samples_to_use]
 
