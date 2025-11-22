@@ -196,6 +196,24 @@ def main():
             self.freeze_btn.toggled.connect(self.on_freeze_toggled)
             btn_layout.addWidget(self.freeze_btn)
 
+            # Create rescale button
+            self.rescale_btn = QtWidgets.QPushButton("Rescale")
+            self.rescale_btn.setMaximumWidth(100)
+            self.rescale_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: #2d5a7a;
+                    color: {DARK_TEXT};
+                    border: 1px solid #4a7c9a;
+                    padding: 5px;
+                    border-radius: 3px;
+                }}
+                QPushButton:hover {{
+                    background-color: #3d7a9a;
+                }}
+            """)
+            self.rescale_btn.clicked.connect(self.on_rescale)
+            btn_layout.addWidget(self.rescale_btn)
+
             # Create export button (hidden by default)
             self.export_btn = QtWidgets.QPushButton("Export CSV")
             self.export_btn.setMaximumWidth(120)
@@ -296,6 +314,33 @@ def main():
                     # Add 10% padding
                     padding = y_range * 0.1 if y_range > 0 else 0.5
                     plot.setYRange(y_min - padding, y_max + padding, padding=0)
+
+        def rescale_to_first_10_percent(self):
+            """Rescale plots based on first 10% of samples in buffer."""
+            num_samples_to_use = max(1, self.buff_size // 10)
+
+            for i, plot in enumerate(self.plots):
+                # Get first 10% of buffer (most recent data in circular buffer)
+                y_data = self.sample_buffers[i, :num_samples_to_use]
+
+                # Only consider non-zero values
+                valid_data = y_data[y_data != 0] if np.any(y_data != 0) else y_data
+
+                if len(valid_data) > 0:
+                    y_min, y_max = np.min(valid_data), np.max(valid_data)
+                    y_range = y_max - y_min
+
+                    # Add 10% padding
+                    padding = y_range * 0.1 if y_range > 0 else 0.5
+                    plot.setYRange(y_min - padding, y_max + padding, padding=0)
+
+            print(
+                f"Rescaled to first {num_samples_to_use} samples ({num_samples_to_use / self.buff_size * 100:.1f}% of buffer)"
+            )
+
+        def on_rescale(self):
+            """Handle rescale button click."""
+            self.rescale_to_first_10_percent()
 
         def update_data(self, values):
             """Update all plots with new data."""
