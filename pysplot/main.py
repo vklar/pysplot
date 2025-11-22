@@ -7,6 +7,7 @@ def main():
     import pyqtgraph as pg
     import datetime
     import argparse
+    import threading
 
     DARK_BG = "#1e1e1e"
     DARK_TEXT = "#e0e0e0"
@@ -62,12 +63,21 @@ def main():
             sys.exit(1)
         return usb_ports[0]
 
+    # ===== CHECK FOR PIPED INPUT =====
+    def has_piped_input():
+        """Check if stdin is piped (not a TTY)."""
+        return not sys.stdin.isatty()
+
     args = parse_args()
-    port = get_port(args.port)
     baudrate = args.baudrate
     buff_size = args.size
+    use_pipe = has_piped_input()
 
-    print(f"Port: {port} | Baudrate: {baudrate} | Buffer: {buff_size}")
+    if use_pipe:
+        print("Stdin mode: Reading from piped input")
+    else:
+        port = get_port(args.port)
+        print(f"Serial mode: Port: {port} | Baudrate: {baudrate} | Buffer: {buff_size}")
 
     # ===== SERIAL WORKER THREAD =====
     class SerialWorker(QtCore.QObject):
@@ -146,6 +156,123 @@ def main():
             self.running = False
             if self.ser and self.ser.is_open:
                 self.ser.close()
+
+    # ===== STDIN WORKER THREAD =====
+    class StdinWorker(QtCore.QObject):
+        """Worker thread for reading from piped stdin."""
+
+        data_received = QtCore.pyqtSignal(np.ndarray)
+        error_occurred = QtCore.pyqtSignal(str)
+        signals_detected = QtCore.pyqtSignal(int)
+
+        def __init__(self):
+            super().__init__()
+            import fcntl
+            import os
+
+            self.queue = []
+            self.running = True
+            self.delimiter = None
+            self.fd = sys.stdin.fileno()
+
+            # Make stdin non-blocking
+            flags = fcntl.fcntl(self.fd, fcntl.F_GETFL)
+            fcntl.fcntl(self.fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+
+        @staticmethod
+        def detect_delimiter(line):
+            """Auto-detect delimiter (tab, comma, or space)."""
+            for delim in ["\t", ",", " ", ";"]:
+                if delim in line:
+                    return delim
+            return "\t"  # default
+
+        def detect_signals(self):
+            """Non-blocking detection - returns default, emits signal when first line arrives."""
+            print("Waiting for first data line to detect number of signals...")
+            return 2
+
+        def run(self):
+            """Main worker loop - continuously read stdin data."""
+            import os
+            import time
+
+            signals_detected_this_run = False
+            buffer = ""
+
+            while self.running:
+                try:
+                    # READ LOOP: Drain the pipe completely before processing/sleeping
+                    # This prevents lag if data comes in faster than 1024 bytes/ms
+                    raw_data = b""
+                    while True:
+                        try:
+                            # Read raw bytes directly from FD (bypassing TextIOWrapper buffering)
+                            chunk = os.read(self.fd, 8192)
+                            if not chunk:
+                                break
+                            raw_data += chunk
+                        except BlockingIOError:
+                            # No more data available in pipe right now
+                            break
+
+                    if raw_data:
+                        # Decode bytes to string (ignore errors to prevent crash on partial utf-8)
+                        buffer += raw_data.decode("utf-8", errors="ignore")
+
+                        # Process complete lines
+                        while "\n" in buffer:
+                            line, buffer = buffer.split("\n", 1)
+                            line = line.strip()
+
+                            if line:
+                                try:
+                                    values = np.array(
+                                        [
+                                            float(v.strip())
+                                            for v in line.split(self.delimiter or "\t")
+                                        ]
+                                    )
+
+                                    # Auto-detect on first line
+                                    if not signals_detected_this_run:
+                                        if self.delimiter is None:
+                                            self.delimiter = self.detect_delimiter(line)
+                                        # Re-parse with confirmed delimiter to be safe
+                                        values = np.array(
+                                            [float(v.strip()) for v in line.split(self.delimiter)]
+                                        )
+
+                                        num_signals = len(values)
+                                        print(
+                                            f"Detected {num_signals} signal(s) with delimiter: {repr(self.delimiter)}"
+                                        )
+                                        self.signals_detected.emit(num_signals)
+                                        signals_detected_this_run = True
+
+                                    self.queue.append(values)
+                                except (ValueError, IndexError):
+                                    pass
+
+                    # If we received an empty chunk but didn't hit BlockingIOError, it's EOF
+                    if not raw_data and not signals_detected_this_run:
+                        # Check if it was actual EOF or just empty read loop start
+                        pass
+
+                    # Emit queued data
+                    while self.queue:
+                        self.data_received.emit(self.queue.pop(0))
+
+                    # Sleep briefly to yield to CPU
+                    time.sleep(0.001)
+
+                except Exception as e:
+                    self.error_occurred.emit(f"Worker error: {e}")
+                    time.sleep(0.1)
+
+        def stop(self):
+            """Stop worker."""
+            self.running = False
 
     # ===== STACKED PLOTS WINDOW CLASS =====
     class StackedPlotsWindow(QtWidgets.QMainWindow):
@@ -395,18 +522,23 @@ def main():
                         self, "Export Error", f"Failed to export data: {e}"
                     )
 
-    # ===== INITIALIZE WORKER THREAD =====
-    try:
-        worker = SerialWorker(port, baudrate)
-        num_signals = worker.detect_signals()
-    except serial.SerialException as e:
-        print(f"Fatal error: {e}")
-        sys.exit(1)
-
     # ===== GUI SETUP =====
     app = QtWidgets.QApplication([])
 
-    # Create stacked plots window
+    # ===== INITIALIZE WORKER THREAD =====
+    try:
+        if use_pipe:
+            worker = StdinWorker()
+            num_signals = 2  # Start with default, will update when first line arrives
+        else:
+            port = get_port(args.port)
+            worker = SerialWorker(port, baudrate)
+            num_signals = worker.detect_signals()
+    except (serial.SerialException, Exception) as e:
+        print(f"Fatal error: {e}")
+        sys.exit(1)
+
+    # Create stacked plots window (immediately, even in pipe mode)
     window = StackedPlotsWindow(num_signals, buff_size)
     window.show()
 
@@ -424,8 +556,19 @@ def main():
         """Handle worker errors."""
         print(f"Error: {msg}")
 
+    def on_signals_detected(num_signals_actual):
+        """Handle detection of actual signal count in piped mode."""
+        if use_pipe and num_signals_actual != window.num_signals:
+            print(f"Resizing window for {num_signals_actual} signals")
+            window.num_signals = num_signals_actual
+            window.resize(1000, 100 + 150 * num_signals_actual)
+            # Recreate buffers and plots if needed
+            window.sample_buffers = np.zeros((num_signals_actual, buff_size))
+
     worker.data_received.connect(on_data_received)
     worker.error_occurred.connect(on_error)
+    if hasattr(worker, "signals_detected"):
+        worker.signals_detected.connect(on_signals_detected)
 
     # ===== CLEANUP ON EXIT =====
     def on_close():
