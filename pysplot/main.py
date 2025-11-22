@@ -163,7 +163,6 @@ def main():
 
         data_received = QtCore.pyqtSignal(np.ndarray)
         error_occurred = QtCore.pyqtSignal(str)
-        signals_detected = QtCore.pyqtSignal(int)
 
         def __init__(self):
             super().__init__()
@@ -174,10 +173,14 @@ def main():
             self.running = True
             self.delimiter = None
             self.fd = sys.stdin.fileno()
+            self.buffer = ""  # Shared buffer to preserve data between detect and run
 
             # Make stdin non-blocking
-            flags = fcntl.fcntl(self.fd, fcntl.F_GETFL)
-            fcntl.fcntl(self.fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+            try:
+                flags = fcntl.fcntl(self.fd, fcntl.F_GETFL)
+                fcntl.fcntl(self.fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+            except Exception as e:
+                print(f"Warning: Could not set non-blocking mode: {e}")
 
         @staticmethod
         def detect_delimiter(line):
@@ -188,82 +191,93 @@ def main():
             return "\t"  # default
 
         def detect_signals(self):
-            """Non-blocking detection - returns default, emits signal when first line arrives."""
-            print("Waiting for first data line to detect number of signals...")
-            return 2
+            """Blocking wait for first line to determine signal count."""
+            print("Waiting for data on stdin...")
+            import time
+            import os
+
+            while True:
+                try:
+                    # Read chunks until we get a newline
+                    chunk = os.read(self.fd, 4096)
+                    if chunk:
+                        self.buffer += chunk.decode("utf-8", errors="ignore")
+
+                        if "\n" in self.buffer:
+                            # Grab the first line
+                            line, remainder = self.buffer.split("\n", 1)
+                            line = line.strip()
+
+                            # Put remainder back in buffer for run()
+                            self.buffer = remainder
+
+                            if line:
+                                self.delimiter = self.detect_delimiter(line)
+                                try:
+                                    values = np.array(
+                                        [float(v.strip()) for v in line.split(self.delimiter)]
+                                    )
+                                    count = len(values)
+                                    print(
+                                        f"Detected {count} signals with delimiter: {repr(self.delimiter)}"
+                                    )
+
+                                    # Queue this first sample so it's not lost
+                                    self.queue.append(values)
+                                    return count
+                                except ValueError:
+                                    pass  # Header or garbage? continue
+                    else:
+                        # EOF or no data yet; wait briefly
+                        time.sleep(0.01)
+
+                except BlockingIOError:
+                    time.sleep(0.01)
+                except Exception as e:
+                    print(f"Error detecting signals: {e}")
+                    return 1  # Fallback if something goes wrong
 
         def run(self):
             """Main worker loop - continuously read stdin data."""
             import os
             import time
 
-            signals_detected_this_run = False
-            buffer = ""
-
             while self.running:
                 try:
-                    # READ LOOP: Drain the pipe completely before processing/sleeping
-                    # This prevents lag if data comes in faster than 1024 bytes/ms
+                    # 1. Read all available data into self.buffer (Drain the pipe)
                     raw_data = b""
                     while True:
                         try:
-                            # Read raw bytes directly from FD (bypassing TextIOWrapper buffering)
                             chunk = os.read(self.fd, 8192)
                             if not chunk:
                                 break
                             raw_data += chunk
                         except BlockingIOError:
-                            # No more data available in pipe right now
+                            break
+                        except Exception:
                             break
 
                     if raw_data:
-                        # Decode bytes to string (ignore errors to prevent crash on partial utf-8)
-                        buffer += raw_data.decode("utf-8", errors="ignore")
+                        self.buffer += raw_data.decode("utf-8", errors="ignore")
 
-                        # Process complete lines
-                        while "\n" in buffer:
-                            line, buffer = buffer.split("\n", 1)
-                            line = line.strip()
+                    # 2. Process complete lines in buffer
+                    while "\n" in self.buffer:
+                        line, self.buffer = self.buffer.split("\n", 1)
+                        line = line.strip()
+                        if line:
+                            try:
+                                values = np.array(
+                                    [float(v.strip()) for v in line.split(self.delimiter or "\t")]
+                                )
+                                self.queue.append(values)
+                            except (ValueError, IndexError):
+                                pass
 
-                            if line:
-                                try:
-                                    values = np.array(
-                                        [
-                                            float(v.strip())
-                                            for v in line.split(self.delimiter or "\t")
-                                        ]
-                                    )
-
-                                    # Auto-detect on first line
-                                    if not signals_detected_this_run:
-                                        if self.delimiter is None:
-                                            self.delimiter = self.detect_delimiter(line)
-                                        # Re-parse with confirmed delimiter to be safe
-                                        values = np.array(
-                                            [float(v.strip()) for v in line.split(self.delimiter)]
-                                        )
-
-                                        num_signals = len(values)
-                                        print(
-                                            f"Detected {num_signals} signal(s) with delimiter: {repr(self.delimiter)}"
-                                        )
-                                        self.signals_detected.emit(num_signals)
-                                        signals_detected_this_run = True
-
-                                    self.queue.append(values)
-                                except (ValueError, IndexError):
-                                    pass
-
-                    # If we received an empty chunk but didn't hit BlockingIOError, it's EOF
-                    if not raw_data and not signals_detected_this_run:
-                        # Check if it was actual EOF or just empty read loop start
-                        pass
-
-                    # Emit queued data
+                    # 3. Emit queued data
                     while self.queue:
                         self.data_received.emit(self.queue.pop(0))
 
-                    # Sleep briefly to yield to CPU
+                    # 4. Sleep briefly
                     time.sleep(0.001)
 
                 except Exception as e:
@@ -271,7 +285,6 @@ def main():
                     time.sleep(0.1)
 
         def stop(self):
-            """Stop worker."""
             self.running = False
 
     # ===== STACKED PLOTS WINDOW CLASS =====
@@ -529,7 +542,8 @@ def main():
     try:
         if use_pipe:
             worker = StdinWorker()
-            num_signals = 2  # Start with default, will update when first line arrives
+            # Wait for the first line of data to determine count
+            num_signals = worker.detect_signals()
         else:
             port = get_port(args.port)
             worker = SerialWorker(port, baudrate)
