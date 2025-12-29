@@ -381,3 +381,12 @@ class StackedPlotsWindow(QtWidgets.QMainWindow):
             except Exception as e:
                 print(f"Error exporting data: {e}")
                 QtWidgets.QMessageBox.critical(self, "Export Error", f"Failed to export data: {e}")
+
+    def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:  # type: ignore[override]
+        """Handle keyboard events - 'q' quits, space toggles freeze."""
+        if event.key() == QtCore.Qt.Key.Key_Q:
+            self.close()
+        elif event.key() == QtCore.Qt.Key.Key_Space:
+            self.freeze_btn.toggle()
+        else:
+            super().keyPressEvent(event)
