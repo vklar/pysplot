@@ -29,6 +29,9 @@ class StackedPlotsWindow(QtWidgets.QMainWindow):
         self.autoscale_samples: list[np.ndarray] = []
         self.autoscale_enabled = True
 
+        self.frozen_buffer: list[np.ndarray] = []
+        self.max_frozen_buffer = 100000
+
         self.plot_visible = [True] * num_signals
         self.plot_containers: list[
             tuple[QtWidgets.QWidget, pg.PlotWidget, QtWidgets.QPushButton, QtWidgets.QWidget]
@@ -293,6 +296,9 @@ class StackedPlotsWindow(QtWidgets.QMainWindow):
             self.freeze_btn.setText("Frozen")
         else:
             self.freeze_btn.setText("Freeze")
+            for frozen_sample in self.frozen_buffer:
+                self.update_data(frozen_sample)
+            self.frozen_buffer.clear()
 
     def apply_autoscale(self) -> None:
         """Apply autoscaling based on current buffer data."""
@@ -339,26 +345,34 @@ class StackedPlotsWindow(QtWidgets.QMainWindow):
 
     def update_data(self, values: np.ndarray) -> None:
         """Update all plots with new data."""
-        if not self.frozen and len(values) == self.num_signals:
-            if not self.autoscale_applied:
-                self.sample_count += 1
+        if len(values) != self.num_signals:
+            return
 
-                if self.sample_count > SKIP_INITIAL_SAMPLES:
-                    self.autoscale_samples.append(values.copy())
+        if self.frozen:
+            self.frozen_buffer.append(values.copy())
+            if len(self.frozen_buffer) > self.max_frozen_buffer:
+                self.frozen_buffer.pop(0)
+            return
 
-                if len(self.autoscale_samples) == AUTOSCALE_SAMPLES:
-                    print(
-                        f"Autoscale enabled based on samples {SKIP_INITIAL_SAMPLES + 1}-{SKIP_INITIAL_SAMPLES + AUTOSCALE_SAMPLES}"
-                    )
-                    self.autoscale_applied = True
+        if not self.autoscale_applied:
+            self.sample_count += 1
 
-            self.sample_buffers = np.column_stack([values, self.sample_buffers[:, :-1]])
+            if self.sample_count > SKIP_INITIAL_SAMPLES:
+                self.autoscale_samples.append(values.copy())
 
-            for i, curve in enumerate(self.curves):
-                curve.setData(self.x_axis, self.sample_buffers[i])
+            if len(self.autoscale_samples) == AUTOSCALE_SAMPLES:
+                print(
+                    f"Autoscale enabled based on samples {SKIP_INITIAL_SAMPLES + 1}-{SKIP_INITIAL_SAMPLES + AUTOSCALE_SAMPLES}"
+                )
+                self.autoscale_applied = True
 
-            if self.autoscale_enabled and self.autoscale_applied:
-                self.apply_autoscale()
+        self.sample_buffers = np.column_stack([values, self.sample_buffers[:, :-1]])
+
+        for i, curve in enumerate(self.curves):
+            curve.setData(self.x_axis, self.sample_buffers[i])
+
+        if self.autoscale_enabled and self.autoscale_applied:
+            self.apply_autoscale()
 
     def on_export_csv(self) -> None:
         """Export current frozen data to CSV."""
